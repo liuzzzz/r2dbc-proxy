@@ -25,12 +25,14 @@ import io.r2dbc.proxy.core.ValueStore;
 import io.r2dbc.spi.Batch;
 import io.r2dbc.spi.Result;
 import org.junit.jupiter.api.Test;
+import org.mockito.stubbing.OngoingStubbing;
 import org.reactivestreams.Publisher;
 import org.springframework.util.ReflectionUtils;
 import reactor.core.publisher.Flux;
 import reactor.test.StepVerifier;
 
 import java.lang.reflect.Method;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -116,11 +118,39 @@ public class ProxyExecutionListenerTest {
         Object result = callback.invoke(batch, EXECUTE_METHOD, new String[]{});
 
         StepVerifier.create((Publisher<? extends Result>) result)
-            .verifyComplete();
+                .verifyComplete();
 
         assertThat(beforeQueryValueStoreHolder).doesNotHaveValue(null);
         assertThat(afterQueryValueStoreHolder).doesNotHaveValue(null);
         assertThat(beforeQueryValueStoreHolder.get()).isEqualTo(afterQueryValueStoreHolder.get());
+    }
+
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void contextWriteWithQueryExecution() throws Throwable {
+        ConnectionInfo connectionInfo = mock(ConnectionInfo.class);
+        ProxyConfig proxyConfig = ProxyConfig.builder().build();
+        Batch batch = mock(Batch.class);
+        AtomicReference<Boolean> contextHasKey = new AtomicReference<>();
+        Publisher<Result> mockExecution = Flux.deferContextual(context -> {
+            boolean hasKey = context.hasKey(Optional.class);
+            contextHasKey.set(hasKey);
+            // if MethodInvocationSubscriber and QueryInvocationSubscriber override CoreSubscriber#currentContext the {hasKey} will be true;
+            // now it's false
+            return Flux.empty();
+        });
+        OngoingStubbing<Publisher<? extends Result>> when = when(batch.execute());
+        when.thenReturn(mockExecution); // mock batch execution
+
+        BatchCallbackHandler callback = new BatchCallbackHandler(batch, connectionInfo, proxyConfig);
+        Object result = callback.invoke(batch, EXECUTE_METHOD, new String[]{});
+        Flux<?> test = Flux.from((Publisher<?>) result)
+                // maybe set dynamic datasource key (that's why I found the problem) or other something
+                .contextWrite(context -> context.put(Optional.class, Optional.of("test")));
+        StepVerifier.create((Publisher<? extends Result>) test)
+                .verifyComplete();
+        assertThat(contextHasKey).hasValue(true);
     }
 
 }
